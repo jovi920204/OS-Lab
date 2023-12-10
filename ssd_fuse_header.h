@@ -13,7 +13,7 @@
 #define NAND_SIZE_KB (10)
 #define INVALID_PCA     (0xFFFFFFFF)
 #define FULL_PCA     (0xFFFFFFFE)
-#define NAND_LOCATION  "/media/sf_Lab-Project/20231203"
+#define NAND_LOCATION  "/media/sf_Lab-Project/20231205-dynamic-reverse-gc"
 
 enum
 {

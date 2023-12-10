@@ -51,7 +51,6 @@ union pca_rule
 };
 
 PCA_RULE curr_pca;
-PCA_RULE gc_pca;
 
 unsigned int* L2P;
 
@@ -170,9 +169,6 @@ static unsigned int get_next_pca()
         //init
         curr_pca.pca = 0;
         printf("PCA = page %d, nand %d\n", curr_pca.fields.page, curr_pca.fields.block);
-        gc_pca.fields.block = 7;
-        gc_pca.fields.page = 0;
-        printf("GC_PCA = page %d, nand %d, pca %d\n", gc_pca.fields.page, gc_pca.fields.block, gc_pca.pca);
         return curr_pca.pca;
     }
     else if (curr_pca.pca == FULL_PCA)
@@ -184,30 +180,29 @@ static unsigned int get_next_pca()
     if ( curr_pca.fields.page == NAND_SIZE_KB * (1024 / 512) -1 )
     {
         curr_pca.fields.block += 1;
+        if (curr_pca.fields.block == reserve_nand){
+            curr_pca.fields.block += 1;
+        }
     }
     curr_pca.fields.page = (curr_pca.fields.page + 1) % (NAND_SIZE_KB * (1024 / 512));
-    
-    // if ( curr_pca.fields.block >= PHYSICAL_NAND_NUM - 1) 
-    // {
-    //     printf("DO GC\n");
 
-    //     curr_pca.pca = FULL_PCA;
-    //     return FULL_PCA;
-    // }
     if ( remain_pages == 0 ){
         printf("DO GC\n");
+        printf("reserve_nand = %d\n", reserve_nand);
         PCA_RULE reserve_pca;
         reserve_pca.fields.block = reserve_nand;
         reserve_pca.fields.page = 0;
-        // Assume gc target is block 0
 
-        //DO GC
+        // DO GC
         // 1. 選擇最多 invalid 的 block，作為 target block 進行 GC
         PCA_RULE target_pca;
         // 選擇 dirty_block_list 最大的 block
         int max = 0;
         int max_idx = 0;
         for (int i = 0; i < PHYSICAL_NAND_NUM; i++){
+            if (i == reserve_nand){
+                continue;
+            }
             if (dirty_block_list[i] > max){
                 max = dirty_block_list[i];
                 max_idx = i;
@@ -227,6 +222,7 @@ static unsigned int get_next_pca()
                 char buf[512] = {'\0'};
                 ftl_read(buf, info_table[target_pca.fields.block][page]);
                 nand_write(buf, reserve_pca.pca);
+                L2P[info_table[target_pca.fields.block][page]] = reserve_pca.pca;
                 info_table[reserve_pca.fields.block][reserve_pca.fields.page] = info_table[target_pca.fields.block][page];
                 reserve_pca.fields.page++;
             }
@@ -239,22 +235,15 @@ static unsigned int get_next_pca()
         for (int i = 0; i < NAND_SIZE_KB * (1024 / 512); i++){
             info_table[target_pca.fields.block][i] = CLEAR;
         }
-        // 4. 將 reserve_pca copy 回 target_pca
-        for (int page = 0; page < NAND_SIZE_KB * (1024 / 512); page++){
-            if (info_table[reserve_pca.fields.block][page] != DIRTY && info_table[reserve_pca.fields.block][page] != CLEAR){
-                char buf[512] = {'\0'};
-                ftl_read(buf, info_table[reserve_pca.fields.block][page]);
-                nand_write(buf, target_pca.pca);
-                info_table[target_pca.fields.block][target_pca.fields.page] = info_table[reserve_pca.fields.block][page];
-                target_pca.fields.page++;
-            }
+
+        // 4. 將 target block 設為 reserve block
+        reserve_nand = target_pca.fields.block;
+        if (reserve_pca.fields.page >= NAND_SIZE_KB * (1024 / 512)){
+            printf("After GC -> SSD FULL\n");
+            curr_pca.pca = FULL_PCA;
+            return FULL_PCA;
         }
-        // 5. 將 reserve_pca erase
-        nand_erase(reserve_pca.fields.block);
-        for (int i = 0; i < NAND_SIZE_KB * (1024 / 512); i++){
-            info_table[reserve_pca.fields.block][i] = CLEAR;
-        }
-        curr_pca.pca = target_pca.pca;
+        curr_pca.pca = reserve_pca.pca;
         return curr_pca.pca;
     }
     else
@@ -300,6 +289,7 @@ static int ftl_write(const char* buf, size_t lba_rnage, size_t lba)
         info_table[pca.fields.block][pca.fields.page] = lba; // new page is VALID
         remain_pages--;
         printf(" --> remain_pages = %d\n", remain_pages);
+        printf(" --> reserve_nand = %d\n", reserve_nand);
         printf(" --> info_table\n");
         int i, j;
         for (i = 0; i < PHYSICAL_NAND_NUM; i++){
@@ -427,8 +417,6 @@ static int ssd_do_write(const char *buf, size_t size, off_t offset)
     tmp_lba_range = (offset + size - 1) / 512 - (tmp_lba) + 1;
     process_size = 0;
     remain_size = size;
-    if (*(buf + remain_size - 1) == '\n')
-        remain_size--;
     curr_size = 0;
 
     // consider case:
@@ -444,15 +432,15 @@ static int ssd_do_write(const char *buf, size_t size, off_t offset)
     for (idx = 0; idx < tmp_lba_range; idx++)
     {
         /*  example only align 512, need to implement other cases  */
-
+        printf("tmp lba >>>>> %d", tmp_lba);
         if (offset % 512 == 0)
         {
-            // printf(">>>>> ssd_do_write Case 1\n");
-            if (!ftl_read(alignBuf, tmp_lba)) // LBA space is clear
+            printf(">>>>> ssd_do_write Case 1\n");
+            if (!ftl_read(alignBuf, tmp_lba + idx)) // LBA space is clear
             {
                 rst = ftl_write(buf + process_size, 1, tmp_lba + idx);
             }
-            else
+            else // LBA space is dirty
             {
                 if (remain_size > 512)
                     memcpy(&alignBuf, buf + process_size, 512);
